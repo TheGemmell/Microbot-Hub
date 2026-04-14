@@ -1,19 +1,16 @@
 package net.runelite.client.plugins.microbot.lizardmanshaman;
 
-import net.runelite.api.NpcID;
-import net.runelite.api.ObjectID;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.Script;
+import net.runelite.client.plugins.microbot.api.npc.Rs2NpcCache;
+import net.runelite.client.plugins.microbot.api.tileitem.Rs2TileItemCache;
+import net.runelite.client.plugins.microbot.api.tileobject.Rs2TileObjectCache;
+import net.runelite.client.plugins.microbot.api.tileobject.models.Rs2TileObjectModel;
 import net.runelite.client.plugins.microbot.util.Rs2InventorySetup;
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.combat.Rs2Combat;
-import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
-import net.runelite.client.plugins.microbot.util.grounditem.LootingParameters;
-import net.runelite.client.plugins.microbot.util.grounditem.Rs2GroundItem;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
-import net.runelite.client.plugins.microbot.util.npc.Rs2Npc;
-import net.runelite.client.plugins.microbot.util.npc.Rs2NpcModel;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.prayer.Rs2Prayer;
 import net.runelite.client.plugins.microbot.util.prayer.Rs2PrayerEnum;
@@ -28,6 +25,10 @@ public class LizardmanShamanScript extends Script {
 
     public static double version = 1.0;
 
+    private final Rs2NpcCache rs2NpcCache = Microbot.getRs2NpcCache();
+    private final Rs2TileItemCache rs2TileItemCache = Microbot.getRs2TileItemCache();
+    private final Rs2TileObjectCache rs2TileObjectCache = Microbot.getRs2TileObjectCache();
+
     private enum State {
         BANKING,
         WALKING_TO_TEMPLE,
@@ -37,8 +38,8 @@ public class LizardmanShamanScript extends Script {
         FIGHTING
     }
 
-    private static final int SHAMAN_ID = NpcID.LIZARDMAN_SHAMAN_8565;
-    private static final int TEMPLE_ENTRANCE_OBJECT = ObjectID.LIZARD_DWELLING_34405;
+    private static final int SHAMAN_ID = 8565;
+    private static final int TEMPLE_ENTRANCE_OBJECT = 34405;
 
     private static final WorldPoint TEMPLE_ENTRANCE = new WorldPoint(1312, 3686, 0);
     private static final WorldPoint PRIMARY_TILE = new WorldPoint(1294, 10092, 0);
@@ -82,7 +83,7 @@ public class LizardmanShamanScript extends Script {
                 }
 
             } catch (Exception ex) {
-                ex.printStackTrace();
+                Microbot.logStackTrace(this.getClass().getSimpleName(), ex);
                 Microbot.log("LizardmanShamanScript: " + ex.getMessage());
             }
         }, 0, 400, TimeUnit.MILLISECONDS);
@@ -140,7 +141,21 @@ public class LizardmanShamanScript extends Script {
     }
 
     private void handleEnterTemple() {
-        if (Rs2GameObject.interact(TEMPLE_ENTRANCE_OBJECT, "Enter", 10)) {
+        Rs2TileObjectModel entrance = rs2TileObjectCache.query()
+                .withId(TEMPLE_ENTRANCE_OBJECT)
+                .nearest();
+
+        if (entrance == null) {
+            return;
+        }
+
+        WorldPoint playerLocation = Rs2Player.getWorldLocation();
+        if (playerLocation != null && playerLocation.distanceTo(entrance.getWorldLocation()) > 51) {
+            Rs2Walker.walkTo(entrance.getWorldLocation());
+            return;
+        }
+
+        if (entrance.click("Enter")) {
             sleepUntil(this::isInTemple, 5000);
         }
     }
@@ -159,10 +174,13 @@ public class LizardmanShamanScript extends Script {
             return;
         }
 
-        Rs2NpcModel shaman = Rs2Npc.getNpcs(SHAMAN_ID)
-                .filter(npc -> !npc.isDead())
-                .filter(npc -> !npc.isInteracting()
-                        || Objects.equals(npc.getInteracting(), Microbot.getClient().getLocalPlayer()))
+        var localPlayer = Microbot.getClient().getLocalPlayer();
+        var shaman = rs2NpcCache.query()
+                .withId(SHAMAN_ID)
+                .where(npc -> !npc.isDead())
+                .where(npc -> !npc.isInteracting() || Objects.equals(npc.getInteracting(), localPlayer))
+                .toList()
+                .stream()
                 .min(Comparator.comparingInt(npc ->
                         npc.getWorldLocation().distanceTo(Rs2Player.getWorldLocation())))
                 .orElse(null);
@@ -177,7 +195,7 @@ public class LizardmanShamanScript extends Script {
             return;
         }
 
-        Rs2Npc.attack(shaman);
+        shaman.click("Attack");
     }
 
     private void handleLoot(LizardmanShamanConfig config) {
@@ -186,31 +204,13 @@ public class LizardmanShamanScript extends Script {
                 .filter(s -> !s.isEmpty() && !s.equalsIgnoreCase("coins"))
                 .toArray(String[]::new);
 
-        if (names.length > 0) {
-            LootingParameters itemParams = new LootingParameters(
-                    config.lootRange(),
-                    1,
-                    1,
-                    0,
-                    false,
-                    true,
-                    names
-            );
-
-            if (Rs2GroundItem.lootItemsBasedOnNames(itemParams)) {
+        for (String name : names) {
+            if (rs2TileItemCache.query().withName(name).within(config.lootRange()).interact("Take")) {
                 return;
             }
         }
 
-        LootingParameters coinParams = new LootingParameters(
-                config.lootRange(),
-                1,
-                1,
-                0,
-                false,
-                true
-        );
-        Rs2GroundItem.lootCoins(coinParams);
+        rs2TileItemCache.query().withName("Coins").within(config.lootRange()).interact("Take");
     }
 
     private void handlePrayers(LizardmanShamanConfig config) {
@@ -239,14 +239,14 @@ public class LizardmanShamanScript extends Script {
             return false;
         }
 
-        if (Rs2GroundItem.exists("Coins", config.lootRange())) {
+        if (rs2TileItemCache.query().withName("Coins").within(config.lootRange()).nearest() != null) {
             return true;
         }
 
         return Arrays.stream(config.lootItems().split(","))
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
-                .anyMatch(name -> Rs2GroundItem.exists(name, config.lootRange()));
+                .anyMatch(name -> rs2TileItemCache.query().withName(name).within(config.lootRange()).nearest() != null);
     }
 
     private boolean isAtTempleEntrance() {
